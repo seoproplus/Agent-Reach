@@ -11,6 +11,7 @@ error tells the caller to use the public-web backend (Jina/Exa).
 import json
 import os
 import re
+from pathlib import Path
 from urllib.parse import quote_plus
 
 from agent_reach.runtime.result import BAD_INPUT, NEED_SETUP, UPSTREAM_BROKEN, ReachError, make_item
@@ -79,13 +80,32 @@ _API_HOSTS = ("openapi.naver.com",)
 _SOURCES = ("news", "blog", "cafearticle", "webkr")
 
 
+def _load_env_file() -> dict:
+    """Load NAVER_CLIENT_ID and NAVER_CLIENT_SECRET from .env file in skill dir."""
+    env_path = Path(__file__).parent.parent.parent / "skill" / ".env"
+    if not env_path.exists():
+        return {}
+    result = {}
+    try:
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            result[key.strip()] = value.strip()
+    except Exception:
+        pass
+    return result
+
+
 def _naver_api_key() -> tuple[str, str] | None:
-    """Return (client_id, client_secret) from env or config; None when absent."""
+    """Return (client_id, client_secret) from env, config, or .env file; None when absent."""
+    # 1. Environment variable NAVER_API_KEY (format: "id:secret")
     raw = os.environ.get("NAVER_API_KEY") or ""
     if not raw:
+        # 2. Config file (~/.agent-reach/config.yaml: naver_api)
         try:
             from agent_reach.config import Config
-
             raw = Config(read_only=True).get("naver_api") or ""
         except Exception:
             raw = ""
@@ -93,6 +113,20 @@ def _naver_api_key() -> tuple[str, str] | None:
         client_id, secret = raw.split(":", 1)
         if client_id.strip() and secret.strip():
             return client_id.strip(), secret.strip()
+
+    # 3. Separate env vars: NAVER_CLIENT_ID + NAVER_CLIENT_SECRET
+    client_id = os.environ.get("NAVER_CLIENT_ID", "").strip()
+    secret = os.environ.get("NAVER_CLIENT_SECRET", "").strip()
+    if client_id and secret:
+        return client_id, secret
+
+    # 4. .env file in skill directory
+    env_vars = _load_env_file()
+    client_id = env_vars.get("NAVER_CLIENT_ID", "").strip()
+    secret = env_vars.get("NAVER_CLIENT_SECRET", "").strip()
+    if client_id and secret:
+        return client_id, secret
+
     return None
 
 
@@ -126,7 +160,12 @@ class NaverChannel(Channel):
     def setup_problems(self) -> list:
         if _naver_api_key():
             return []
-        return ["no Naver Open API key: get one at https://developers.naver.com/apps, then `agent-reach configure naver-api` (id:secret)"]
+        return [
+            "no Naver Open API key: get one at https://developers.naver.com/apps, then either:",
+            "  1) `agent-reach configure naver-api` with 'id:secret', or",
+            "  2) set NAVER_CLIENT_ID and NAVER_CLIENT_SECRET env vars, or",
+            "  3) create agent_reach/skill/.env with NAVER_CLIENT_ID=xxx and NAVER_CLIENT_SECRET=yyy",
+        ]
 
     def validate_params(self, action: str, params: dict) -> None:
         if action == "search" and params.get("source") not in _SOURCES:
@@ -147,8 +186,10 @@ class NaverChannel(Channel):
             raise ReachError(
                 NEED_SETUP,
                 "no Naver Open API key configured",
-                hint="Ask the user for a client id/secret from https://developers.naver.com/apps, "
-                     "then run `agent-reach configure naver-api` with 'id:secret'.",
+                hint="Get client id/secret from https://developers.naver.com/apps, then either:\n"
+                     "  1) run `agent-reach configure naver-api` with 'id:secret', or\n"
+                     "  2) set NAVER_CLIENT_ID and NAVER_CLIENT_SECRET env vars, or\n"
+                     "  3) create agent_reach/skill/.env with NAVER_CLIENT_ID=xxx and NAVER_CLIENT_SECRET=yyy",
             )
         client_id, secret = key
         url = f"https://openapi.naver.com/v1/search/{source}.json?query={quote_plus(query)}&display={min(limit, 100)}&sort=sim"
